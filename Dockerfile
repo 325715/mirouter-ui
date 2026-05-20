@@ -10,7 +10,7 @@ RUN go run unzip.go && rm unzip.go
 
 RUN echo "Building version: $VERSION"
 
-RUN go build -mod=vendor -ldflags "-X 'main.Version=$VERSION'"  -o main .
+RUN go build -ldflags "-X 'main.Version=$VERSION'"  -o main .
 
 FROM alpine:3.18
 
