@@ -6,3 +6,5 @@ aa.sh
 mirouter-ui.exe
 database.db
 config.yaml
+static/
+vendor/

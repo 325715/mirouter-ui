@@ -1,12 +1,13 @@
 package main
 
 import (
-	"embed"
+	"archive/zip"
+	"bytes"
+	_ "embed"
 	"encoding/json"
 	_ "flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 
 	"github.com/Mirouterui/mirouter-ui/modules/config"
@@ -27,8 +28,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-//go:embed static
-var staticFS embed.FS
+//go:embed static.zip
+var staticZipBytes []byte
 
 var (
 	tokens         map[int]string
@@ -189,11 +190,11 @@ func main() {
 	})
 
 	if !tiny {
-		subFS, err := fs.Sub(staticFS, "static")
+		zipReader, err := zip.NewReader(bytes.NewReader(staticZipBytes), int64(len(staticZipBytes)))
 		if err != nil {
-			logrus.Fatal("Failed to get sub FS for static: ", err)
+			logrus.Fatal("Failed to read static zip: ", err)
 		}
-		r.StaticFS("/web/", http.FS(subFS))
+		r.StaticFS("/web/", http.FS(zipReader))
 		// 重定向到/web/
 		r.GET("/", func(c *gin.Context) {
 			c.Redirect(http.StatusMovedPermanently, "/web/")
