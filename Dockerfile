@@ -1,6 +1,6 @@
 ARG VERSION
 
-FROM golang:1.21.0-alpine3.18 AS builder
+FROM golang:1.24.3-alpine AS builder
 
 WORKDIR /app
 
@@ -8,9 +8,7 @@ COPY . .
 
 RUN echo "Building version: $VERSION"
 
-RUN go mod download
-
-RUN go build -ldflags "-X 'main.Version=$VERSION'"  -o main .
+RUN go build -mod=vendor -ldflags "-X 'main.Version=$VERSION'"  -o main .
 
 FROM alpine:3.18
 

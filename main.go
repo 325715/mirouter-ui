@@ -1,22 +1,22 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	_ "flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 
 	"github.com/Mirouterui/mirouter-ui/modules/config"
 	"github.com/Mirouterui/mirouter-ui/modules/database"
-	"github.com/Mirouterui/mirouter-ui/modules/download"
 	login "github.com/Mirouterui/mirouter-ui/modules/login"
 	"github.com/Mirouterui/mirouter-ui/modules/tp"
 
 	// _ "net/http/pprof"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -26,6 +26,9 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/sirupsen/logrus"
 )
+
+//go:embed static
+var staticFS embed.FS
 
 var (
 	tokens         map[int]string
@@ -186,12 +189,11 @@ func main() {
 	})
 
 	if !tiny {
-		directory := "static"
-		if workdirectory != "" {
-			directory = filepath.Join(workdirectory, "static")
+		subFS, err := fs.Sub(staticFS, "static")
+		if err != nil {
+			logrus.Fatal("Failed to get sub FS for static: ", err)
 		}
-		logrus.Debug("Static resource directory: " + directory)
-		r.Static("/web/", directory)
+		r.StaticFS("/web/", http.FS(subFS))
 		// 重定向到/web/
 		r.GET("/", func(c *gin.Context) {
 			c.Redirect(http.StatusMovedPermanently, "/web/")
@@ -361,18 +363,11 @@ func main() {
 	})
 
 	r.GET("/systemapi/flushstatic", func(c *gin.Context) {
-		// logrus.Debugln(c.Query("api_key"))
 		if c.Query("api_key") != api_key {
 			c.JSON(http.StatusUnauthorized, gin.H{"msg": "Authentication failed"})
 			return
 		}
-		err := download.DownloadStatic(workdirectory, true, true)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"msg": err})
-			return
-		}
-		logrus.Debugln("Execution completed")
-		c.JSON(http.StatusOK, gin.H{"msg": "Execution completed"})
+		c.JSON(http.StatusOK, gin.H{"msg": "Static resources are embedded in the binary and cannot be updated dynamically"})
 	})
 
 	r.GET("/systemapi/refresh", func(c *gin.Context) {

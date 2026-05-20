@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Mirouterui/mirouter-ui/modules/download"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -125,11 +124,7 @@ func LoadConfig() (*AppConfig, error) {
 		logrus.SetLevel(logrus.InfoLevel)
 	}
 
-	// Check for updates
-	autocheckupdatebool, _ := strconv.ParseBool(autocheckupdate)
-	if !Cfg.Tiny {
-		download.DownloadStatic(Cfg.Workdirectory, false, autocheckupdatebool)
-	}
+	logrus.Info("Using embedded static resources")
 
 	return Cfg, nil
 }
