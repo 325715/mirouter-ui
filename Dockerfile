@@ -1,6 +1,6 @@
 ARG VERSION
 
-FROM golang:1.24.3-alpine AS builder
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
