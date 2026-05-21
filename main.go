@@ -2,14 +2,12 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
-	_ "embed"
 	"encoding/json"
 	_ "flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
+	"path/filepath"
 
 	"github.com/Mirouterui/mirouter-ui/modules/config"
 	"github.com/Mirouterui/mirouter-ui/modules/database"
@@ -29,9 +27,6 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/sirupsen/logrus"
 )
-
-//go:embed static.zip
-var staticZipBytes []byte
 
 var (
 	tokens         map[int]string
@@ -54,28 +49,6 @@ var (
 	address        string
 	skipCheck      bool
 )
-
-// compatibleZipFS 自定义自适应虚拟文件系统，在运行时自适应正/反斜杠路径寻址
-type compatibleZipFS struct {
-	r *zip.Reader
-}
-
-func (cfs *compatibleZipFS) Open(name string) (fs.File, error) {
-	// 1. 首先尝试按标准正斜杠路径打开
-	f, err := cfs.r.Open(name)
-	if err == nil {
-		return f, nil
-	}
-
-	// 2. 兼容 Windows 反斜杠格式：将所有的正斜杠 / 替换为 Windows 的反斜杠 \ 再次尝试打开
-	winName := strings.ReplaceAll(name, "/", "\\")
-	f, err = cfs.r.Open(winName)
-	if err == nil {
-		return f, nil
-	}
-
-	return nil, err
-}
 
 type Config struct {
 	Dev          []config.Dev `json:"dev"`
@@ -214,65 +187,20 @@ func main() {
 	})
 
 	if !tiny {
-		zipReader, err := zip.NewReader(bytes.NewReader(staticZipBytes), int64(len(staticZipBytes)))
-		if err != nil {
-			logrus.Fatal("Failed to read static zip: ", err)
+		// 检查本地是否存在 static/index.html，如果不存在则自动拉取
+		if _, err := os.Stat("static/index.html"); os.IsNotExist(err) {
+			logrus.Info("本地未检测到 static/index.html，开始从 https://file.zhya.top/mi-ui-static.zip 自动下载最新静态资源包...")
+			err := downloadAndUnzip("https://file.zhya.top/mi-ui-static.zip", "static")
+			if err != nil {
+				logrus.Fatalf("下载并解压静态资源包失败: %v", err)
+			}
+			logrus.Info("静态资源包下载并解压成功！")
 		}
 
-		// 构建虚拟文件和虚拟目录的内存极速检索索引，同时将 Windows 反斜杠 \ 重构为标准正斜杠 /
-		virtualFiles := make(map[string]bool)
-		virtualDirs := make(map[string]bool)
-		for _, f := range zipReader.File {
-			f.Name = strings.ReplaceAll(f.Name, "\\", "/")
-			virtualFiles[f.Name] = true
+		// 使用物理磁盘目录进行极速挂载
+		r.StaticFS("/web/", http.Dir("static"))
 
-			// 提取所有父级目录，建立目录映射关系
-			parts := strings.Split(f.Name, "/")
-			for i := 1; i < len(parts); i++ {
-				dirPath := strings.Join(parts[:i], "/")
-				virtualDirs[dirPath] = true
-			}
-		}
-
-		// 引入极其健壮的“虚拟文件系统路由中间件”，完美解决虚拟目录 301 重定向与 index.html 自动寻址
-		r.Use(func(c *gin.Context) {
-			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/web/") {
-				relPath := strings.TrimPrefix(path, "/web/")
-				relPath = strings.TrimSuffix(relPath, "/")
-
-				if relPath == "" {
-					// 访问根目录 /web/ 直接在内部映射到 index.html
-					c.Request.URL.Path = "/web/index.html"
-					c.Next()
-					return
-				}
-
-				// 精确匹配虚拟文件直接放行
-				if virtualFiles[relPath] {
-					c.Next()
-					return
-				}
-
-				// 匹配虚拟目录
-				if virtualDirs[relPath] {
-					// 如果路径末尾没有斜杠，执行 301 重定向到带斜杠路径（符合 HTTP 规范，保障资源相对路径正确）
-					if !strings.HasSuffix(path, "/") {
-						c.Redirect(http.StatusMovedPermanently, path+"/")
-						c.Abort()
-						return
-					}
-					// 如果已经有斜杠，内部无缝重写为读取该目录下的 index.html
-					c.Request.URL.Path = path + "index.html"
-					c.Next()
-					return
-				}
-			}
-			c.Next()
-		})
-
-		r.StaticFS("/web/", http.FS(&compatibleZipFS{r: zipReader}))
-		// 重定向到/web/
+		// 重定向到 /web/
 		r.GET("/", func(c *gin.Context) {
 			c.Redirect(http.StatusMovedPermanently, "/web/")
 		})
@@ -445,7 +373,13 @@ func main() {
 			c.JSON(http.StatusUnauthorized, gin.H{"msg": "Authentication failed"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"msg": "Static resources are embedded in the binary and cannot be updated dynamically"})
+		logrus.Info("收到手动刷新静态资源请求，开始重新下载解压...")
+		err := downloadAndUnzip("https://file.zhya.top/mi-ui-static.zip", "static")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"msg": "Flush static failed: " + err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"msg": "Static resources flushed successfully"})
 	})
 
 	r.GET("/systemapi/refresh", func(c *gin.Context) {
@@ -493,4 +427,100 @@ func main() {
 	}()
 
 	r.Run(fmt.Sprintf("%s:%d", address, port))
+}
+
+// downloadAndUnzip 从指定的 URL 下载 Zip 资源并解压到目标目录
+func downloadAndUnzip(url string, destDir string) error {
+	// 1. 创建目标临时文件，用于存储下载的 zip
+	tmpFile, err := os.CreateTemp("", "mi-ui-static-*.zip")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// 2. 发起 HTTP GET 请求下载
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("请求下载地址失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载请求返回非 200 状态码: %d", resp.StatusCode)
+	}
+
+	// 3. 写入临时文件
+	_, err = io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+
+	// 4. 重置临时文件指针到开头
+	_, err = tmpFile.Seek(0, 0)
+	if err != nil {
+		return fmt.Errorf("重置文件指针失败: %w", err)
+	}
+
+	// 5. 获取临时文件大小
+	stat, err := tmpFile.Stat()
+	if err != nil {
+		return fmt.Errorf("获取临时文件状态失败: %w", err)
+	}
+
+	// 6. 用 archive/zip 读取并解开到 destDir
+	zipReader, err := zip.NewReader(tmpFile, stat.Size())
+	if err != nil {
+		return fmt.Errorf("读取 zip 文件失败: %w", err)
+	}
+
+	// 确保目标目录存在
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("创建目标目录失败: %w", err)
+	}
+
+	for _, f := range zipReader.File {
+		// 统一处理 Windows 压缩包中的反斜杠 \，替换为标准正斜杠 /
+		cleanedName := strings.ReplaceAll(f.Name, "\\", "/")
+		
+		// 拼接解压后的物理完整路径
+		fpath := filepath.Join(destDir, cleanedName)
+
+		// 检查路径安全（防止 Zip Slip 漏洞）
+		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(destDir)) {
+			continue
+		}
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, 0755)
+			continue
+		}
+
+		// 创建该文件所在的父级目录
+		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+			return fmt.Errorf("创建文件父目录失败: %w", err)
+		}
+
+		// 写入物理文件
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return fmt.Errorf("创建输出文件失败: %w", err)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			outFile.Close()
+			return fmt.Errorf("打开 zip 内文件流失败: %w", err)
+		}
+
+		_, err = io.Copy(outFile, rc)
+		rc.Close()
+		outFile.Close()
+		if err != nil {
+			return fmt.Errorf("解压写入文件失败: %w", err)
+		}
+	}
+
+	return nil
 }
