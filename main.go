@@ -195,10 +195,59 @@ func main() {
 		if err != nil {
 			logrus.Fatal("Failed to read static zip: ", err)
 		}
-		// 黄金法则：强制将 zip 文件内所有的 Windows 反斜杠 \ 路径统一重构为 Linux 标准正斜杠 /
+
+		// 构建虚拟文件和虚拟目录的内存极速检索索引，同时将 Windows 反斜杠 \ 重构为标准正斜杠 /
+		virtualFiles := make(map[string]bool)
+		virtualDirs := make(map[string]bool)
 		for _, f := range zipReader.File {
 			f.Name = strings.ReplaceAll(f.Name, "\\", "/")
+			virtualFiles[f.Name] = true
+
+			// 提取所有父级目录，建立目录映射关系
+			parts := strings.Split(f.Name, "/")
+			for i := 1; i < len(parts); i++ {
+				dirPath := strings.Join(parts[:i], "/")
+				virtualDirs[dirPath] = true
+			}
 		}
+
+		// 引入极其健壮的“虚拟文件系统路由中间件”，完美解决虚拟目录 301 重定向与 index.html 自动寻址
+		r.Use(func(c *gin.Context) {
+			path := c.Request.URL.Path
+			if strings.HasPrefix(path, "/web/") {
+				relPath := strings.TrimPrefix(path, "/web/")
+				relPath = strings.TrimSuffix(relPath, "/")
+
+				if relPath == "" {
+					// 访问根目录 /web/ 直接在内部映射到 index.html
+					c.Request.URL.Path = "/web/index.html"
+					c.Next()
+					return
+				}
+
+				// 精确匹配虚拟文件直接放行
+				if virtualFiles[relPath] {
+					c.Next()
+					return
+				}
+
+				// 匹配虚拟目录
+				if virtualDirs[relPath] {
+					// 如果路径末尾没有斜杠，执行 301 重定向到带斜杠路径（符合 HTTP 规范，保障资源相对路径正确）
+					if !strings.HasSuffix(path, "/") {
+						c.Redirect(http.StatusMovedPermanently, path+"/")
+						c.Abort()
+						return
+					}
+					// 如果已经有斜杠，内部无缝重写为读取该目录下的 index.html
+					c.Request.URL.Path = path + "index.html"
+					c.Next()
+					return
+				}
+			}
+			c.Next()
+		})
+
 		r.StaticFS("/web/", http.FS(zipReader))
 		// 重定向到/web/
 		r.GET("/", func(c *gin.Context) {
