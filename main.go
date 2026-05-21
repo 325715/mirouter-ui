@@ -8,6 +8,7 @@ import (
 	_ "flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 
 	"github.com/Mirouterui/mirouter-ui/modules/config"
@@ -53,6 +54,28 @@ var (
 	address        string
 	skipCheck      bool
 )
+
+// compatibleZipFS 自定义自适应虚拟文件系统，在运行时自适应正/反斜杠路径寻址
+type compatibleZipFS struct {
+	r *zip.Reader
+}
+
+func (cfs *compatibleZipFS) Open(name string) (fs.File, error) {
+	// 1. 首先尝试按标准正斜杠路径打开
+	f, err := cfs.r.Open(name)
+	if err == nil {
+		return f, nil
+	}
+
+	// 2. 兼容 Windows 反斜杠格式：将所有的正斜杠 / 替换为 Windows 的反斜杠 \ 再次尝试打开
+	winName := strings.ReplaceAll(name, "/", "\\")
+	f, err = cfs.r.Open(winName)
+	if err == nil {
+		return f, nil
+	}
+
+	return nil, err
+}
 
 type Config struct {
 	Dev          []config.Dev `json:"dev"`
@@ -248,7 +271,7 @@ func main() {
 			c.Next()
 		})
 
-		r.StaticFS("/web/", http.FS(zipReader))
+		r.StaticFS("/web/", http.FS(&compatibleZipFS{r: zipReader}))
 		// 重定向到/web/
 		r.GET("/", func(c *gin.Context) {
 			c.Redirect(http.StatusMovedPermanently, "/web/")
