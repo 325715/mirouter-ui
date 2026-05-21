@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -193,6 +194,10 @@ func main() {
 		zipReader, err := zip.NewReader(bytes.NewReader(staticZipBytes), int64(len(staticZipBytes)))
 		if err != nil {
 			logrus.Fatal("Failed to read static zip: ", err)
+		}
+		// 黄金法则：强制将 zip 文件内所有的 Windows 反斜杠 \ 路径统一重构为 Linux 标准正斜杠 /
+		for _, f := range zipReader.File {
+			f.Name = strings.ReplaceAll(f.Name, "\\", "/")
 		}
 		r.StaticFS("/web/", http.FS(zipReader))
 		// 重定向到/web/
