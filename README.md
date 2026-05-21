@@ -18,9 +18,9 @@
 ### 1. 准备配置文件
 
 1. 在项目根目录下新建一个 `data` 文件夹用于存放配置和历史数据库文件。
-2. 将 `config.example.yaml` 复制到该目录下并重命名为 `config.yaml`：
-   * **Linux/macOS (Bash)**: `mkdir -p data && cp config.example.yaml data/config.yaml`
-   * **Windows (PowerShell)**: `mkdir data; copy config.example.yaml data/config.yaml`
+2. 将根目录下的 `config.yaml` 复制到该目录下：
+   * **Linux/macOS (Bash)**: `mkdir -p data && cp config.yaml data/config.yaml`
+   * **Windows (PowerShell)**: `mkdir data; copy config.yaml data/config.yaml`
 3. 编辑 `data/config.yaml`，填入您的小米路由器 **管理密码** (`password`) 与 **IP 地址** (`ip`)。
 
 ### 2. 🚀 Docker 极速部署（推荐 🐳）
