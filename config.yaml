@@ -1,8 +1,12 @@
 # 路由器设备配置
 dev:
-  - password: ""  # 路由器密码
+  - password: "1214.zhy.1214"  # 路由器密码
     key: "a2ffa5c9be07488bbb04a3a47d3c5f6a"  # 路由器密钥
-    ip: "192.168.31.1"  # 路由器IP地址
+    ip: "mi1.zhya.top:56789"  # 路由器IP地址
+    islocal: false  # 是否为本地模式
+  - password: "1214.zhy.1214"  # 路由器密码
+    key: "a2ffa5c9be07488bbb04a3a47d3c5f6a"  # 路由器密钥
+    ip: "mi1.zhya.top:45678"  # 路由器IP地址
     islocal: false  # 是否为本地模式
 
 # 历史记录配置
@@ -12,7 +16,7 @@ history:
   sampletime: 300  # 采样时间（秒）
 
 # 应用配置
-debug: true  # 调试模式
+debug: false  # 调试模式
 port: 6789  # 服务端口
 address: "0.0.0.0"  # 监听地址
 tiny: false  # 精简模式
