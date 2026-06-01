@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,11 @@ var (
 	api_key        string
 	address        string
 	skipCheck      bool
+)
+
+var (
+	reconnectMutex    sync.Mutex
+	lastReconnectTime time.Time
 )
 
 type Config struct {
@@ -130,28 +136,109 @@ func getconfig(c *gin.Context) {
 	})
 }
 
-func gettoken(dev []config.Dev) {
+func gettoken(dev []config.Dev) error {
+	var firstErr error
 	for i, d := range dev {
-		token, routerName, hardware := login.GetToken(d.Password, d.Key, d.IP, skipCheck)
+		token, routerName, hardware, err := login.GetToken(d.Password, d.Key, d.IP, skipCheck)
+		if err != nil {
+			logrus.Warnf("获取路由器 %s 登录令牌失败（等待断网重连中）: %v", d.IP, err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			tokens[i] = ""
+			continue
+		}
 		tokens[i] = token
 		routerNames[i] = routerName
 		hardwares[i] = hardware
 		isLocals[i] = d.IsLocal
 		logrus.Debug(hardwares[i])
 	}
+	return firstErr
 }
 
 func handleRouterAPI(routernum int, apipath string) (map[string]interface{}, error) {
 	ip := dev[routernum].IP
 	url := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s/api/%s", ip, tokens[routernum], apipath)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("xiaomi router API call failed, please check configuration or router status")
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+
+	// 1. 设置严格的 5 秒超时保护，防止断网长期挂起
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+
 	var result map[string]interface{}
-	json.Unmarshal(body, &result)
+	var code int
+
+	if err == nil {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		json.Unmarshal(body, &result)
+		if result["code"] != nil {
+			code = int(result["code"].(float64))
+		}
+	}
+
+	// 2. 检测到网络故障（err != nil）或会话失效（code == 1101 表示 stok 过期）时，触发静默自愈
+	if err != nil || code == 1101 {
+		// 重连冷却保护：限制 15 秒内只能真正发起 1 次重新登录，防止关机期间的高频尝试
+		reconnectMutex.Lock()
+		now := time.Now()
+		shouldRetry := false
+		if now.Sub(lastReconnectTime) > 15*time.Second {
+			lastReconnectTime = now
+			logrus.Warnf("检测到路由器 %s 连接断开或令牌失效 (code:%d, err:%v)，正在静默尝试登录重连并获取新 stok...", ip, code, err)
+			
+			// 尝试静默重新登录
+			_, _, _, loginErr := login.GetToken(dev[routernum].Password, dev[routernum].Key, ip, skipCheck)
+			if loginErr == nil {
+				logrus.Info("静默登录重连成功！重新同步全局 Token map")
+				gettoken(dev)
+				shouldRetry = true
+			} else {
+				logrus.Warnf("静默登录重连尝试失败（路由器依然离线中）: %v", loginErr)
+			}
+		}
+		reconnectMutex.Unlock()
+
+		// 如果是因为网络连接本身报错，并且经历了上面的尝试仍然不通，就直接返回超时错误
+		if err != nil {
+			return nil, fmt.Errorf("xiaomi router offline or connection timeout: %w", err)
+		}
+
+		// 如果是因为 Token 失效（code == 1101），且刚才静默重连成功了，就自动使用最新 stok 进行【二次重发尝试】
+		if code == 1101 && shouldRetry {
+			retryUrl := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s/api/%s", ip, tokens[routernum], apipath)
+			retryResp, retryErr := client.Get(retryUrl)
+			if retryErr == nil {
+				defer retryResp.Body.Close()
+				retryBody, _ := io.ReadAll(retryResp.Body)
+				var retryResult map[string]interface{}
+				json.Unmarshal(retryBody, &retryResult)
+				
+				var retryCode int
+				if retryResult["code"] != nil {
+					retryCode = int(retryResult["code"].(float64))
+				}
+				if retryCode == 0 {
+					logrus.Info("自动无感重试并获取数据成功！")
+					if isLocals[routernum] && apipath == "/misystem/status" {
+						cpuPercent := GetCpuPercent()
+						if cpu, ok := retryResult["cpu"].(map[string]interface{}); ok {
+							cpu["load"] = cpuPercent
+						}
+					}
+					return retryResult, nil
+				}
+			}
+		}
+	}
+
+	// 正常返回请求结果
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("xiaomi router api response failed with code: %d", code)
+	}
 
 	if isLocals[routernum] && apipath == "/misystem/status" {
 		cpuPercent := GetCpuPercent()
@@ -383,7 +470,11 @@ func main() {
 	})
 
 	r.GET("/systemapi/refresh", func(c *gin.Context) {
-		gettoken(dev)
+		err := gettoken(dev)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"msg": "Refresh token failed: " + err.Error()})
+			return
+		}
 		logrus.Debugln("Execution completed")
 		c.JSON(http.StatusOK, gin.H{"msg": "Execution completed"})
 	})
@@ -400,7 +491,16 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"msg": "Shutting down"})
 	})
 
-	gettoken(dev)
+	// 启动时登录：若网络不通（返回 err），则进入 5 秒一轮的静默重试机制，绝不暴毙！
+	for {
+		err := gettoken(dev)
+		if err == nil {
+			logrus.Info("所有配置的路由器登录认证成功，服务顺利拉起！")
+			break
+		}
+		logrus.Warnf("启动时登录失败（可能是路由器离线或网络未畅通），5秒后重新尝试握手... 详情: %v", err)
+		time.Sleep(5 * time.Second)
+	}
 
 	database.CheckDatabase(databasepath)
 	c.AddFunc("@every "+strconv.Itoa(flushTokenTime)+"s", func() { gettoken(dev) })
